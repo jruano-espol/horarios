@@ -416,7 +416,7 @@ def main():
                     case "left-arrow":
                         if idx > 0:
                             idx -= 1
-                    case "left-arrow":
+                    case "right-arrow":
                         if idx < last_valid:
                             idx += 1
 
