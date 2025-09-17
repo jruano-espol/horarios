@@ -1,10 +1,11 @@
 from enum import IntEnum
 from dataclasses import dataclass
 from collections import defaultdict
-from itertools import product
+import itertools
 import pandas as pd
 import dash
 from dash import Input, Output, State, dash_table, html, dcc
+
 
 FILENAME = "Horarios Semestre 6.md"
 
@@ -46,14 +47,26 @@ def str_from_hour(hour: Hour) -> str:
     return f"{hour.hours:02d}:{hour.minutes:02d}"
 
 
+def hour_from_str(s: str) -> Hour:
+    parts = s.split(':')
+    assert len(parts) == 2
+    return Hour(hours=int(parts[0].strip()), minutes=int(parts[1].strip()))
+
+
 @dataclass
 class Hour_Range:
     start: Hour
     end:   Hour
 
 
-def str_from_hours(hours: Hour_Range) -> str:
+def str_from_hour_range(hours: Hour_Range) -> str:
     return f'{str_from_hour(hours.start)}-{str_from_hour(hours.end)}'
+
+
+def hour_range_from_str(s: str) -> Hour_Range:
+    parts = s.split('-')
+    assert len(parts) == 2
+    return Hour_Range(start=hour_from_str(parts[0].strip()), end=hour_from_str(parts[1].strip()))
 
 
 def do_hours_overlap(range1: Hour_Range, range2: Hour_Range) -> bool:
@@ -61,6 +74,16 @@ def do_hours_overlap(range1: Hour_Range, range2: Hour_Range) -> bool:
                 (range1.end.hours == range2.start.hours and range1.end.minutes <= range2.start.minutes) or
                 (range1.start.hours > range2.end.hours) or
                 (range1.start.hours == range2.end.hours and range1.start.minutes >= range2.end.minutes))
+
+
+def check_hours_overlap(ranges: list[Hour_Range]) -> bool:
+    if len(ranges) <= 1:
+        return False
+    for i in range(len(ranges)):
+        for j in range(i + 1, len(ranges)):
+            if do_hours_overlap(ranges[i], ranges[j]):
+                return True
+    return False
 
 
 @dataclass
@@ -72,13 +95,23 @@ class Exam:
 
 def str_from_exam(exam: Exam):
     in_person = "presencial" if exam.in_person else "virtual"
-    return f'(exámen: {exam.id} {str_from_hours(exam.hours)} {in_person})'
+    return f'(exámen: {exam.id} {str_from_hour_range(exam.hours)} {in_person})'
 
 
 def do_exams_overlap(exam1: Exam, exam2: Exam) -> bool:
     if exam1.id != exam2.id:
         return False
     return do_hours_overlap(exam1.hours, exam2.hours)
+
+
+def check_exams_overlap(exams: list[Exam]) -> bool:
+    if len(exams) <= 1:
+        return False
+    for i in range(len(exams)):
+        for j in range(i + 1, len(exams)):
+            if do_exams_overlap(exams[i], exams[j]):
+                return True
+    return False
 
 
 @dataclass
@@ -89,6 +122,35 @@ class Schedule:
     in_person: bool
     available: int
     exam: Exam
+    associated_class: 'Class'
+
+
+def is_schedule_valid(schedule: Schedule, accepted: Hour_Range) -> bool:
+    schedule_start = schedule.hours.start.hours * 60 + schedule.hours.start.minutes
+    schedule_end = schedule.hours.end.hours * 60 + schedule.hours.end.minutes
+    accepted_start = accepted.start.hours * 60 + accepted.start.minutes
+    accepted_end = accepted.end.hours * 60 + accepted.end.minutes
+
+    is_accepted = (schedule_start >= accepted_start) and (schedule_end <= accepted_end)
+    return is_accepted
+
+
+def is_schedule_arrangement_valid(schedules: list[Schedule], accepted: Hour_Range) -> bool:
+    if len(schedules) <= 1:
+        return True
+    if check_exams_overlap([schedule.exam for schedule in schedules]):
+        return False
+    day_hours = {i: [] for i in range(Day.Count)}
+    for schedule in schedules:
+        if not is_schedule_valid(schedule, accepted):
+            return False
+        for i in range(Day.Count):
+            if schedule.days & (1 << i):
+                day_hours[i].append(schedule.hours)
+    for _, hours in day_hours.items():
+        if check_hours_overlap(hours):
+            return False
+    return True
 
 
 @dataclass
@@ -98,7 +160,7 @@ class Class:
     exam: Exam
 
 
-def parse_days(line: str) -> (int, int):
+def parse_days(line: str) -> tuple[int, int]:
     has = [
         line.find("lun") >= 0,
         line.find("mar") >= 0,
@@ -116,7 +178,7 @@ def parse_days(line: str) -> (int, int):
     return days, line.find(' ')
 
 
-def parse_in_person(line: str) -> (bool, int):
+def parse_in_person(line: str) -> tuple[bool, int]:
     P, V = 'presencial', 'virtual'
     p, v = line.find(P), line.find(V)
     if p >= 0:
@@ -124,7 +186,7 @@ def parse_in_person(line: str) -> (bool, int):
     return False, v + len(V)
 
 
-def parse_hours(line: str) -> (Hour_Range, int):
+def parse_hours(line: str) -> tuple[Hour_Range, int]:
     start, end = Hour(0, 0), Hour(0, 0)
     count = 0
 
@@ -161,7 +223,7 @@ def parse_exam(line) -> Exam:
     return Exam(id, hours, in_person)
 
 
-def parse_schedule(line: str, maybe_exam: Exam):
+def parse_schedule(line: str, associated_class: Class):
     line = line[len("- Paralelo "):]
 
     next = line.find(' '); assert next >= 0
@@ -181,14 +243,14 @@ def parse_schedule(line: str, maybe_exam: Exam):
     available = int(line[:next])
     line = line[next + 1:]
 
-    next = line.find('(');
+    next = line.find('(')
     if next >= 0:
         line = line[next + 1:]
         exam = parse_exam(line)
     else:
-        exam = maybe_exam
+        exam = associated_class.exam
 
-    return Schedule(group, days, hours, in_person, available, exam)
+    return Schedule(group, days, hours, in_person, available, exam, associated_class)
 
 
 def parse_title(line: str) -> Class:
@@ -205,60 +267,64 @@ def parse_semester_line(lines: list[str]) -> list[Class]:
         line = lines[current_line].strip()
         if line[0] == '-':
             last = classes[len(classes) - 1]
-            last.options.append(parse_schedule(line, last.exam))
+            last.options.append(parse_schedule(line, last))
         else:
             classes.append(parse_title(line))
 
     return classes
 
 
+def pretty_print_schedule(schedule: Schedule, option_index: int):
+    in_person = "presencial" if schedule.in_person else "virtual"
+    class_line = [
+        f'{option_index:02d}.',
+        f'Paralelo {schedule.group:02d}:',
+        f'{str_from_days(schedule.days)}',
+        f'{str_from_hour_range(schedule.hours)}',
+        f'{in_person}',
+        f'{schedule.available} cupos',
+        f'{str_from_exam(schedule.exam)}',
+    ]
+    class_line = " ".join(class_line)
+    print(class_line)
+
+
 def show_semester_line(classes: list[Class], show_options=True):
     if show_options:
         for c in classes:
             print(f'{c.name}:')
-            for schedule in c.options:
-                in_person = "presencial" if schedule.in_person else "virtual"
-                print(f' - Paralelo {schedule.group:02d}: {str_from_days(schedule.days)} {str_from_hours(schedule.hours)} {in_person} {schedule.available} cupos {str_from_exam(schedule.exam)}')
+            for index, schedule in enumerate(c.options):
+                pretty_print_schedule(schedule, index)
             print('')
     else:
         for c in classes:
             print(f'- {c.name}')
 
 
-def generate_valid_combinations(classes: list[Class]) -> list[list[tuple[str, Schedule]]]:
-    all_combinations = list(product(*([(cls.name, schedule) for schedule in cls.options] for cls in classes)))
-    valid_combinations = []
+def generate_all_valid_choices(classes: list[Class], accepted: Hour_Range) -> list[list[Schedule]]:
+    ranges = [range(len(c.options)) for c in classes]
+    cartesian_product = itertools.product(*ranges)
+    valid_choices = []
 
-    for combination in all_combinations:
-        is_valid = True
-        for i in range(len(combination)):
-            for j in range(i + 1, len(combination)):
-                if do_hours_overlap(combination[i][1].hours, combination[j][1].hours):
-                    is_valid = False
-                    break
-                if do_exams_overlap(combination[i][1].exam, combination[j][1].exam):
-                    is_valid = False
-                    break
+    for option_indices in cartesian_product:
+        choice = [classes[class_index].options[option_index] 
+                  for class_index, option_index in enumerate(option_indices)]
+        if is_schedule_arrangement_valid(choice, accepted):
+            valid_choices.append(choice)
 
-            if not is_valid:
-                break
-
-        if is_valid:
-            valid_combinations.append(list(combination))
-
-    return valid_combinations
+    return valid_choices
 
 
-def get_day_layout_div(valid_combination: list[tuple]) -> str:
+def get_day_layout_div(valid_combination: list[Schedule]) -> html.Ul:
     root = html.Ul([])
 
     # Group schedules by the days they are active using the bit flags
     schedules_by_day = defaultdict(list)
 
-    for class_name, schedule in valid_combination:
+    for schedule in valid_combination:
         for i in range(Day.Count):
             if schedule.days & (1 << i):
-                schedules_by_day[i].append((class_name, schedule))
+                schedules_by_day[i].append(schedule)
 
     # Iterate over each day and print its schedule
     for day_num in range(Day.Count):
@@ -270,20 +336,30 @@ def get_day_layout_div(valid_combination: list[tuple]) -> str:
             li.children.append(f"{day_str.capitalize()}:")
 
             # Sort schedules by their start time to display them in order
-            schedules.sort(key=lambda x: (x[1].hours.start.hours, x[1].hours.start.minutes))
+            schedules.sort(key=lambda x: (x.hours.start.hours, x.hours.start.minutes))
 
             ul = html.Ul([])
-            for class_name, schedule in schedules:
-                time_range = str_from_hours(schedule.hours)
-                group = schedule.group
-                ul.children.append(html.Li(f"    {time_range} Paralelo {group:02d}: {class_name}"))
+            for schedule in schedules:
+                index = schedule.associated_class.options.index(schedule)
+                class_name = schedule.associated_class.name
+                time_range = str_from_hour_range(schedule.hours)
+                in_person = "Presencial" if schedule.in_person else "Virtual"
+                class_line =  [
+                    f"{time_range}",
+                    f"(option_index={index:02d})",
+                    f"Paralelo {schedule.group:02d}",
+                    f"({in_person}, {schedule.available} cupos)",
+                    f"{str_from_exam(schedule.exam)}: {class_name}",
+                ]
+                class_line = " ".join(class_line)
+                ul.children.append(html.Li(class_line))
             li.children.append(ul)
             root.children.append(li)
 
     return root
 
 
-def dataframe_from_valid_combination(valid_combination: list[tuple[str, Schedule]]) -> pd.DataFrame :
+def dataframe_from_valid_combination(valid_combination: list[tuple[Schedule]]) -> pd.DataFrame :
     # Create an empty DataFrame to represent the schedule
     days_of_week = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
     time_slots = [f"{h:02}:{m:02}" for h in range(7, 24) for m in [0, 30]]  # 07:00 to 23:00, half-hour intervals
@@ -292,8 +368,8 @@ def dataframe_from_valid_combination(valid_combination: list[tuple[str, Schedule
     # Initialize a dictionary for each day
     schedule_dict = {day: [""] * len(time_slots) for day in days_of_week}
 
-    for class_name, schedule in valid_combination:
-        # Calculate start and end time slots
+    for schedule in valid_combination:
+        class_name = schedule.associated_class.name
         start_time = schedule.hours.start.hours * 60 + schedule.hours.start.minutes  # In minutes
         end_time = schedule.hours.end.hours * 60 + schedule.hours.end.minutes  # In minutes
 
@@ -303,11 +379,12 @@ def dataframe_from_valid_combination(valid_combination: list[tuple[str, Schedule
 
         # Fill the schedule for the corresponding days
         for i in range(Day.Count):
-            if schedule.days & (1 << i):  # If this day is active
+            if schedule.days & (1 << i):
                 day = days_of_week[i]
                 for row in range(start_row, end_row):
                     if schedule_dict[day][row] == "":
-                        schedule_dict[day][row] = f"{class_name} Paralelo {schedule.group}"
+                        not_in_person = "(Virtual)" if not schedule.in_person else ""
+                        schedule_dict[day][row] = f"{class_name} P{schedule.group} {not_in_person}"
 
     # Convert the schedule dictionary to a list of rows
     for time, row in zip(time_slots, range(len(time_slots))):
@@ -333,19 +410,29 @@ def main():
         prev_line = parse_semester_line(prev_line_lines)
         this_line = parse_semester_line(this_line_lines)
 
-        # show_options = False
-        # print('-'*90)
-        # show_semester_line(prev_line, show_options)
-        # print('-'*90)
-        # show_semester_line(this_line, show_options)
-        # print('-'*90)
+        show_classes = False; show_options = True
+        if show_classes:
+            print('-'*90)
+            show_semester_line(prev_line, show_options)
+            print('-'*90)
+            show_semester_line(this_line, show_options)
+            print('-'*90)
 
         classes = []
         classes.extend(prev_line)
         classes.append(this_line[0])
+        # classes.append(this_line[1])
+        classes.append(this_line[2])
         classes.append(this_line[3])
 
-        valid_combinations = generate_valid_combinations(classes)
+        if show_classes:
+            for i, c in enumerate(classes):
+                print(f'[{i:02d}] = |option_count:{len(c.options):02d}| {c.name}')
+
+        # TODO: Make the accepted hour range configurable
+        accepted = hour_range_from_str('9:00-16:30')
+
+        valid_combinations = generate_all_valid_choices(classes, accepted)
         dataframes = [dataframe_from_valid_combination(choice) for choice in valid_combinations]
         day_layout_divs = [get_day_layout_div(choice) for choice in valid_combinations]
 
@@ -381,7 +468,7 @@ def main():
                     },
                     style_cell={
                         'textAlign': 'center',
-                        'fontSize': '10px',
+                        'fontSize': '12px',
                         'height': 'auto',
                         'width': 'auto',
                     },
