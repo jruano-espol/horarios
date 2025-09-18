@@ -515,6 +515,13 @@ def main():
 
         idx = 0
         app = dash.Dash(__name__)
+        root_style = {
+            'display': 'flex',
+            'flexDirection': 'column',
+            'alignItems': 'center',
+            'fontSize': '14px',
+            'fontFamily': 'Inter',
+        }
 
         if len(valid_combinations) > 0:
             df = dataframes[idx]
@@ -561,13 +568,7 @@ def main():
                     },
                     style_data_conditional=conditional_style,
                 ),
-            ], style={
-                'display': 'flex',
-                'flexDirection': 'column',
-                'alignItems': 'center',
-                'fontSize': '14px',
-                'fontFamily': 'Inter',
-            })
+            ], style=root_style)
 
             @app.callback(
                 [
@@ -619,8 +620,12 @@ def main():
                 )
         else:
             app.layout = html.Div([
-                html.P(f"There are no possible schedules."),
-            ])
+                html.Link(
+                    rel='stylesheet',
+                    href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap'
+                ),
+                html.P(f"No hay posibles combinaciones"),
+            ], style=root_style)
 
         app.run(debug=True)
 
