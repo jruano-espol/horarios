@@ -1,6 +1,7 @@
 from enum import IntEnum
 from dataclasses import dataclass
 from collections import defaultdict
+import colorsys
 import itertools
 import pandas as pd
 import dash
@@ -8,6 +9,7 @@ from dash import Input, Output, State, dash_table, html, dcc
 
 
 FILENAME = "Horarios Semestre 6.md"
+DAYS_OF_WEEK = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
 
 
 class Day(IntEnum):
@@ -330,7 +332,7 @@ def get_day_layout_div(valid_combination: list[Schedule]) -> html.Ul:
     for day_num in range(Day.Count):
         if day_num in schedules_by_day:
             schedules = schedules_by_day[day_num]
-            day_str = str_from_day(1 << day_num)
+            day_str = DAYS_OF_WEEK[day_num]
 
             li = html.Li([])
             li.children.append(f"{day_str.capitalize()}:")
@@ -346,7 +348,7 @@ def get_day_layout_div(valid_combination: list[Schedule]) -> html.Ul:
                 in_person = "Presencial" if schedule.in_person else "Virtual"
                 class_line =  [
                     f"{time_range}",
-                    f"(option_index={index:02d})",
+                    # f"(option_index={index:02d})",
                     f"Paralelo {schedule.group:02d}",
                     f"({in_person}, {schedule.available} cupos)",
                     f"{str_from_exam(schedule.exam)}: {class_name}",
@@ -359,28 +361,45 @@ def get_day_layout_div(valid_combination: list[Schedule]) -> html.Ul:
     return root
 
 
-def dataframe_from_valid_combination(valid_combination: list[tuple[Schedule]]) -> pd.DataFrame :
-    # Create an empty DataFrame to represent the schedule
-    days_of_week = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
-    time_slots = [f"{h:02}:{m:02}" for h in range(7, 24) for m in [0, 30]]  # 07:00 to 23:00, half-hour intervals
+def generate_class_color(class_index: int, total_classes: int) -> str:
+    h = class_index / total_classes * 0.5
+    r, g, b = colorsys.hsv_to_rgb(h, s=0.5, v=1.0)
+    return f"rgb({int(r * 255)}, {int(g * 255)}, {int(b * 255)})"
+
+
+def generate_time_slots(accepted: Hour_Range) -> list[str]:
+    return [
+        f"{h:02}:{m:02}"
+        for h in range(accepted.start.hours, accepted.end.hours+1)
+        for m in [0, 30] # half-hour intervals
+    ]
+
+
+def dataframe_from_valid_combination(
+    valid_combination: list[tuple[Schedule]],
+    accepted: Hour_Range,
+) -> pd.DataFrame:
+    time_slots = generate_time_slots(accepted)
     data = []
 
     # Initialize a dictionary for each day
-    schedule_dict = {day: [""] * len(time_slots) for day in days_of_week}
+    schedule_dict = {day: [""] * len(time_slots) for day in DAYS_OF_WEEK}
 
     for schedule in valid_combination:
         class_name = schedule.associated_class.name
-        start_time = schedule.hours.start.hours * 60 + schedule.hours.start.minutes  # In minutes
-        end_time = schedule.hours.end.hours * 60 + schedule.hours.end.minutes  # In minutes
+
+        # Starting and end times in minutes
+        start_time = schedule.hours.start.hours * 60 + schedule.hours.start.minutes
+        end_time = schedule.hours.end.hours * 60 + schedule.hours.end.minutes
 
         # Find the corresponding rows for start and end times
-        start_row = (start_time - 7 * 60) // 30
-        end_row = (end_time - 7 * 60) // 30
+        start_row = (start_time - accepted.start.hours * 60) // 30
+        end_row = (end_time - accepted.start.hours * 60) // 30
 
         # Fill the schedule for the corresponding days
         for i in range(Day.Count):
             if schedule.days & (1 << i):
-                day = days_of_week[i]
+                day = DAYS_OF_WEEK[i]
                 for row in range(start_row, end_row):
                     if schedule_dict[day][row] == "":
                         not_in_person = "(Virtual)" if not schedule.in_person else ""
@@ -388,12 +407,67 @@ def dataframe_from_valid_combination(valid_combination: list[tuple[Schedule]]) -
 
     # Convert the schedule dictionary to a list of rows
     for time, row in zip(time_slots, range(len(time_slots))):
-        data_row = [time] + [schedule_dict[day][row] for day in days_of_week]
+        data_row = [time] + [schedule_dict[day][row] for day in DAYS_OF_WEEK]
         data.append(data_row)
 
     # Create the DataFrame for easy table plotting
-    df = pd.DataFrame(data, columns=["Time"] + days_of_week)
+    df = pd.DataFrame(data, columns=["Time"] + DAYS_OF_WEEK)
     return df
+
+
+def generate_color_grid(
+    valid_combination: list[tuple[Schedule]],
+    accepted: Hour_Range,
+    classes: list[Class],
+    classes_colors: list[str],
+) -> dict[str, list[str]]:
+    time_slots = generate_time_slots(accepted)
+
+    color_dict = {day: [""] * len(time_slots) for day in DAYS_OF_WEEK}
+
+    for schedule in valid_combination:
+        class_index = classes.index(schedule.associated_class)
+
+        # Starting and end times in minutes
+        start_time = schedule.hours.start.hours * 60 + schedule.hours.start.minutes
+        end_time = schedule.hours.end.hours * 60 + schedule.hours.end.minutes
+
+        # Find the corresponding rows for start and end times
+        start_row = (start_time - accepted.start.hours * 60) // 30
+        end_row = (end_time - accepted.start.hours * 60) // 30
+
+        for i in range(Day.Count):
+            if schedule.days & (1 << i):
+                day = DAYS_OF_WEEK[i]
+                for row in range(start_row, end_row):
+                    if color_dict[day][row] == "":
+                        color_dict[day][row] = classes_colors[class_index]
+    return color_dict
+
+
+def generate_style(
+    valid_combination: list[tuple[Schedule]],
+    accepted: Hour_Range,
+    classes: list[Class],
+    classes_colors: list[str],
+):
+    color_dict = generate_color_grid(valid_combination, accepted, classes, classes_colors)
+    style_conditions = []
+    
+    for day_str, rows in color_dict.items():
+        day_index = DAYS_OF_WEEK.index(day_str)
+        for row_index, color_str in enumerate(rows):
+            if len(color_str) > 0:
+                style_conditions.append({
+                    'if': {
+                        'column_id': DAYS_OF_WEEK[day_index],
+                        'row_index': row_index,
+                    },
+                    'backgroundColor': color_str,
+                    'color': 'black',  # Text color
+                })
+    
+    return style_conditions
 
 
 def main():
@@ -425,6 +499,8 @@ def main():
         classes.append(this_line[2])
         classes.append(this_line[3])
 
+        classes_colors = [generate_class_color(i, len(classes)) for i in range(len(classes))]
+
         if show_classes:
             for i, c in enumerate(classes):
                 print(f'[{i:02d}] = |option_count:{len(c.options):02d}| {c.name}')
@@ -433,7 +509,8 @@ def main():
         accepted = hour_range_from_str('9:00-16:30')
 
         valid_combinations = generate_all_valid_choices(classes, accepted)
-        dataframes = [dataframe_from_valid_combination(choice) for choice in valid_combinations]
+        dataframes = [dataframe_from_valid_combination(choice, accepted) for choice in valid_combinations]
+        grid_styles = [generate_style(choice, accepted, classes, classes_colors) for choice in valid_combinations]
         day_layout_divs = [get_day_layout_div(choice) for choice in valid_combinations]
 
         idx = 0
@@ -442,12 +519,17 @@ def main():
         if len(valid_combinations) > 0:
             df = dataframes[idx]
             day_layout_div = day_layout_divs[idx]
+            conditional_style = grid_styles[idx]
 
             app.layout = html.Div([
+                html.Link(
+                    rel='stylesheet',
+                    href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap'
+                ),
 
                 dcc.Store(id='current-index', data=idx),
 
-                html.P(id='current-schedule', children=f"Schedule #{idx+1} of {len(valid_combinations)}"),
+                html.P(id='current-schedule', children=f"Posibilidad #{idx+1} de {len(valid_combinations)}"),
 
                 html.Div([
                     html.Button('<<', id='left-arrow-max',  n_clicks=0, style={'margin-right': '10px'}),
@@ -464,31 +546,46 @@ def main():
                     data=df.to_dict('records'),
                     style_table={
                         'height': '100vh',
-                        'width': '100%',
+                        'width': '70%',
                     },
                     style_cell={
                         'textAlign': 'center',
                         'fontSize': '12px',
+                        'fontFamily': 'Inter',
                         'height': 'auto',
                         'width': 'auto',
                     },
                     style_header={
                         'fontWeight': 'bold',
                         'backgroundColor': 'lightgray'
-                    }
+                    },
+                    style_data_conditional=conditional_style,
                 ),
-            ])
+            ], style={
+                'display': 'flex',
+                'flexDirection': 'column',
+                'alignItems': 'center',
+                'fontSize': '14px',
+                'fontFamily': 'Inter',
+            })
 
             @app.callback(
-                [Output('current-index',    'data'),
-                 Output('current-schedule', 'children'),
-                 Output('schedule-table',   'data'),
-                 Output('schedule-layout',  'children')],
-                [Input('left-arrow-max',  'n_clicks'),
-                 Input('left-arrow',      'n_clicks'),
-                 Input('right-arrow',     'n_clicks'),
-                 Input('right-arrow-max', 'n_clicks')],
-                [State('current-index', 'data')]
+                [
+                    Output('current-index',    'data'),
+                    Output('current-schedule', 'children'),
+                    Output('schedule-layout',  'children'),
+                    Output('schedule-table',   'data'),
+                    Output('schedule-table',   'style_data_conditional'),
+                ],
+                [
+                    Input('left-arrow-max',  'n_clicks'),
+                    Input('left-arrow',      'n_clicks'),
+                    Input('right-arrow',     'n_clicks'),
+                    Input('right-arrow-max', 'n_clicks')
+                ],
+                [
+                    State('current-index', 'data'),
+                ]
             )
             def update_schedule(clicks_l_max, clicks_l, clicks_r, clicks_r_max, idx):
                 if len(valid_combinations) == 0:
@@ -509,9 +606,17 @@ def main():
 
                 df = dataframes[idx]
                 day_layout_div = day_layout_divs[idx]
-                current_schedule = f"Schedule #{idx+1} of {len(valid_combinations)}"
+                conditional_style = grid_styles[idx]
+                current_schedule = f"Posibilidad #{idx+1} de {len(valid_combinations)}"
 
-                return idx, current_schedule, df.to_dict('records'), day_layout_div
+                # These need to line up with the `Output`s specified in @app.callback()
+                return (
+                    idx,
+                    current_schedule,
+                    day_layout_div,
+                    df.to_dict('records'),
+                    conditional_style,
+                )
         else:
             app.layout = html.Div([
                 html.P(f"There are no possible schedules."),
